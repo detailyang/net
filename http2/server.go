@@ -495,7 +495,7 @@ type serverConn struct {
 	hs               *http.Server
 	conn             net.Conn
 	bw               *bufferedWriter // writing to conn
-	wg               sync.WaitGroup  // waits all handlers to finishh
+	wg               sync.WaitGroup  // waits all handlers to finish
 	handler          http.Handler
 	baseCtx          context.Context
 	framer           *Framer
