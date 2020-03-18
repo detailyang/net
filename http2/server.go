@@ -1879,6 +1879,7 @@ func (sc *serverConn) processHeaders(f *MetaHeadersFrame) error {
 		sc.conn.SetReadDeadline(time.Time{})
 	}
 
+	sc.wg.Add(1)
 	go sc.runHandler(rw, req, handler)
 	return nil
 }
@@ -2126,7 +2127,6 @@ func (sc *serverConn) newWriterAndRequestNoBody(st *stream, rp requestParam) (*r
 // Run on its own goroutine.
 func (sc *serverConn) runHandler(rw *responseWriter, req *http.Request, handler func(http.ResponseWriter, *http.Request)) {
 	didPanic := true
-	sc.wg.Add(1)
 	defer func() {
 		sc.wg.Done()
 		rw.rws.stream.cancelCtx()
@@ -2885,6 +2885,7 @@ func (sc *serverConn) startPush(msg *startPushRequest) {
 			panic(fmt.Sprintf("newWriterAndRequestNoBody(%+v): %v", msg.url, err))
 		}
 
+		sc.wg.Add(1)
 		go sc.runHandler(rw, req, sc.handler.ServeHTTP)
 		return promisedID, nil
 	}
