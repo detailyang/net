@@ -495,6 +495,7 @@ type serverConn struct {
 	hs               *http.Server
 	conn             net.Conn
 	bw               *bufferedWriter // writing to conn
+	wg               sync.WaitGroup  // waits all handlers to finishh
 	handler          http.Handler
 	baseCtx          context.Context
 	framer           *Framer
@@ -810,6 +811,7 @@ func (sc *serverConn) serve() {
 	defer sc.closeAllStreamsOnConnClose()
 	defer sc.stopShutdownTimer()
 	defer close(sc.doneServing) // unblocks handlers trying to send
+	defer sc.wg.Wait()          // walts handlers to finish
 
 	if VerboseLogs {
 		sc.vlogf("http2: server connection from %v on %p", sc.conn.RemoteAddr(), sc.hs)
@@ -2124,7 +2126,9 @@ func (sc *serverConn) newWriterAndRequestNoBody(st *stream, rp requestParam) (*r
 // Run on its own goroutine.
 func (sc *serverConn) runHandler(rw *responseWriter, req *http.Request, handler func(http.ResponseWriter, *http.Request)) {
 	didPanic := true
+	sc.wg.Add(1)
 	defer func() {
+		sc.wg.Done()
 		rw.rws.stream.cancelCtx()
 		if didPanic {
 			e := recover()

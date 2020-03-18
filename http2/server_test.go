@@ -4098,3 +4098,54 @@ func TestContentEncodingNoSniffing(t *testing.T) {
 		})
 	}
 }
+
+func TestServerConnWaitAllHandlersDone(t *testing.T) {
+	var done uint32
+	server := &http.Server{
+		Addr: ":8080",
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			time.Sleep(3 * time.Second)
+			atomic.AddUint32(&done, 1)
+		}),
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 5 * time.Second,
+	}
+
+	s := &Server{}
+	ConfigureServer(server, s)
+	l, _ := net.Listen("tcp4", ":0")
+	defer l.Close()
+
+	testclient := func(url string) {
+		time.Sleep(1 * time.Second)
+		tr := &Transport{AllowHTTP: true, DialTLS: func(netw, addr string, cfg *tls.Config) (net.Conn, error) {
+			return net.Dial(netw, addr)
+		}}
+		defer tr.CloseIdleConnections()
+
+		c := http.Client{
+			Timeout:   100 * time.Millisecond, // small timeout to trigger timeout
+			Transport: tr,
+		}
+
+		resp, err := c.Get(url)
+		if err != nil {
+			return
+		}
+		defer resp.Body.Close()
+	}
+
+	url := "http://" + l.Addr().String() + "/"
+
+	go testclient(url)
+
+	rwc, err := l.Accept()
+	if err != nil {
+		t.Fatalf("Failed to listen: %v", err)
+	}
+	s.ServeConn(rwc, &ServeConnOpts{BaseConfig: server})
+
+	if d := atomic.LoadUint32(&done); d != 1 {
+		t.Errorf("Expect handler finish but not")
+	}
+}
