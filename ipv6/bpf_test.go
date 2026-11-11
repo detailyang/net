@@ -19,8 +19,8 @@ func TestBPF(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skipf("not supported on %s", runtime.GOOS)
 	}
-	if !nettest.SupportsIPv6() {
-		t.Skip("ipv6 is not supported")
+	if _, err := nettest.RoutedInterface("ip6", net.FlagUp|net.FlagLoopback); err != nil {
+		t.Skip("ipv6 is not enabled for loopback interface")
 	}
 
 	l, err := net.ListenPacket("udp6", "[::1]:0")
@@ -30,6 +30,10 @@ func TestBPF(t *testing.T) {
 	defer l.Close()
 
 	p := ipv6.NewPacketConn(l)
+
+	if err := p.SetBPF(nil); err == nil {
+		t.Fatal("got nil; want non-nil error")
+	}
 
 	// This filter accepts UDP packets whose first payload byte is
 	// even.

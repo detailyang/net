@@ -9,15 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
 	"strings"
 	"testing"
 
 	"golang.org/x/net/http/httpproxy"
 )
-
-// setHelper calls t.Helper() for Go 1.9+ (see go19_test.go) and does nothing otherwise.
-var setHelper = func(t *testing.T) {}
 
 type proxyForURLTest struct {
 	cfg     httpproxy.Config
@@ -69,6 +65,12 @@ var proxyForURLTests = []proxyForURLTest{{
 	},
 	want: "http://cache.corp.example.com",
 }, {
+	// single label domain is recognized as scheme by url.Parse
+	cfg: httpproxy.Config{
+		HTTPProxy: "localhost",
+	},
+	want: "http://localhost",
+}, {
 	cfg: httpproxy.Config{
 		HTTPProxy: "https://cache.corp.example.com",
 	},
@@ -88,6 +90,12 @@ var proxyForURLTests = []proxyForURLTest{{
 		HTTPProxy: "socks5://127.0.0.1",
 	},
 	want: "socks5://127.0.0.1",
+}, {
+	// Preserve unknown schemes.
+	cfg: httpproxy.Config{
+		HTTPProxy: "foo://host",
+	},
+	want: "foo://host",
 }, {
 	// Don't use secure for http
 	cfg: httpproxy.Config{
@@ -199,11 +207,18 @@ var proxyForURLTests = []proxyForURLTest{{
 	},
 	req:  "http://www.xn--fsq092h.com",
 	want: "<nil>",
+}, {
+	cfg: httpproxy.Config{
+		NoProxy:   "example.com",
+		HTTPProxy: "proxy",
+	},
+	req:  "http://[1000::%25.example.com]:123",
+	want: "http://proxy",
 },
 }
 
 func testProxyForURL(t *testing.T, tt proxyForURLTest) {
-	setHelper(t)
+	t.Helper()
 	reqURLStr := tt.req
 	if reqURLStr == "" {
 		reqURLStr = "http://example.com"
@@ -244,10 +259,10 @@ func TestProxyForURL(t *testing.T) {
 }
 
 func TestFromEnvironment(t *testing.T) {
-	os.Setenv("HTTP_PROXY", "httpproxy")
-	os.Setenv("HTTPS_PROXY", "httpsproxy")
-	os.Setenv("NO_PROXY", "noproxy")
-	os.Setenv("REQUEST_METHOD", "")
+	t.Setenv("HTTP_PROXY", "httpproxy")
+	t.Setenv("HTTPS_PROXY", "httpsproxy")
+	t.Setenv("NO_PROXY", "noproxy")
+	t.Setenv("REQUEST_METHOD", "")
 	got := httpproxy.FromEnvironment()
 	want := httpproxy.Config{
 		HTTPProxy:  "httpproxy",
@@ -260,10 +275,10 @@ func TestFromEnvironment(t *testing.T) {
 }
 
 func TestFromEnvironmentWithRequestMethod(t *testing.T) {
-	os.Setenv("HTTP_PROXY", "httpproxy")
-	os.Setenv("HTTPS_PROXY", "httpsproxy")
-	os.Setenv("NO_PROXY", "noproxy")
-	os.Setenv("REQUEST_METHOD", "PUT")
+	t.Setenv("HTTP_PROXY", "httpproxy")
+	t.Setenv("HTTPS_PROXY", "httpsproxy")
+	t.Setenv("NO_PROXY", "noproxy")
+	t.Setenv("REQUEST_METHOD", "PUT")
 	got := httpproxy.FromEnvironment()
 	want := httpproxy.Config{
 		HTTPProxy:  "httpproxy",
@@ -277,15 +292,34 @@ func TestFromEnvironmentWithRequestMethod(t *testing.T) {
 }
 
 func TestFromEnvironmentLowerCase(t *testing.T) {
-	os.Setenv("http_proxy", "httpproxy")
-	os.Setenv("https_proxy", "httpsproxy")
-	os.Setenv("no_proxy", "noproxy")
-	os.Setenv("REQUEST_METHOD", "")
+	t.Setenv("http_proxy", "httpproxy")
+	t.Setenv("https_proxy", "httpsproxy")
+	t.Setenv("no_proxy", "noproxy")
+	t.Setenv("REQUEST_METHOD", "")
 	got := httpproxy.FromEnvironment()
 	want := httpproxy.Config{
 		HTTPProxy:  "httpproxy",
 		HTTPSProxy: "httpsproxy",
 		NoProxy:    "noproxy",
+	}
+	if *got != want {
+		t.Errorf("unexpected proxy config, got %#v want %#v", got, want)
+	}
+}
+
+func TestFromEnvironmentUpperAndLowerCase(t *testing.T) {
+	t.Setenv("HTTP_PROXY", "httpproxyupper")
+	t.Setenv("HTTPS_PROXY", "httpsproxyupper")
+	t.Setenv("NO_PROXY", "noproxyupper")
+	t.Setenv("http_proxy", "httpproxylower")
+	t.Setenv("https_proxy", "httpsproxylower")
+	t.Setenv("no_proxy", "noproxylower")
+	t.Setenv("REQUEST_METHOD", "")
+	got := httpproxy.FromEnvironment()
+	want := httpproxy.Config{
+		HTTPProxy:  "httpproxylower",
+		HTTPSProxy: "httpsproxylower",
+		NoProxy:    "noproxylower",
 	}
 	if *got != want {
 		t.Errorf("unexpected proxy config, got %#v want %#v", got, want)

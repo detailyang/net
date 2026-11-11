@@ -5,6 +5,7 @@
 package publicsuffix
 
 import (
+	"net/netip"
 	"sort"
 	"strings"
 	"testing"
@@ -63,12 +64,11 @@ func TestFind(t *testing.T) {
 
 func TestICANN(t *testing.T) {
 	testCases := map[string]bool{
-		"foo.org":            true,
-		"foo.co.uk":          true,
-		"foo.dyndns.org":     false,
-		"foo.go.dyndns.org":  false,
-		"foo.blogspot.co.uk": false,
-		"foo.intranet":       false,
+		"foo.org":           true,
+		"foo.co.uk":         true,
+		"foo.dyndns.org":    false,
+		"foo.go.dyndns.org": false,
+		"foo.intranet":      false,
 	}
 	for domain, want := range testCases {
 		_, got := PublicSuffix(domain)
@@ -85,6 +85,11 @@ var publicSuffixTestCases = []struct {
 }{
 	// Empty string.
 	{"", "", false},
+
+	// IP addresses don't have a domain hierarchy
+	{"192.0.2.0", "192.0.2.0", false},
+	{"::ffff:192.0.2.0", "::ffff:192.0.2.0", false},
+	{"2001:db8::", "2001:db8::", false},
 
 	// The .ao rules are:
 	// ao
@@ -111,16 +116,12 @@ var publicSuffixTestCases = []struct {
 	// net.ar
 	// org.ar
 	// tur.ar
-	// blogspot.com.ar (in the PRIVATE DOMAIN section).
 	{"ar", "ar", true},
 	{"www.ar", "ar", true},
 	{"nic.ar", "ar", true},
 	{"www.nic.ar", "ar", true},
 	{"com.ar", "com.ar", true},
 	{"www.com.ar", "com.ar", true},
-	{"blogspot.com.ar", "blogspot.com.ar", false},                 // PRIVATE DOMAIN.
-	{"www.blogspot.com.ar", "blogspot.com.ar", false},             // PRIVATE DOMAIN.
-	{"www.xxx.yyy.zzz.blogspot.com.ar", "blogspot.com.ar", false}, // PRIVATE DOMAIN.
 	{"logspot.com.ar", "com.ar", true},
 	{"zlogspot.com.ar", "com.ar", true},
 	{"zblogspot.com.ar", "com.ar", true},
@@ -170,20 +171,13 @@ var publicSuffixTestCases = []struct {
 	// game.tw
 	// ebiz.tw
 	// club.tw
-	// 網路.tw (xn--zf0ao64a.tw)
-	// 組織.tw (xn--uc0atv.tw)
-	// 商業.tw (xn--czrw28b.tw)
-	// blogspot.tw
+	// 台灣.tw (xn--kpry57d.tw)
 	{"tw", "tw", true},
 	{"aaa.tw", "tw", true},
 	{"www.aaa.tw", "tw", true},
 	{"xn--czrw28b.aaa.tw", "tw", true},
 	{"edu.tw", "edu.tw", true},
 	{"www.edu.tw", "edu.tw", true},
-	{"xn--czrw28b.edu.tw", "edu.tw", true},
-	{"xn--czrw28b.tw", "xn--czrw28b.tw", true},
-	{"www.xn--czrw28b.tw", "xn--czrw28b.tw", true},
-	{"xn--uc0atv.xn--czrw28b.tw", "xn--czrw28b.tw", true},
 	{"xn--kpry57d.tw", "tw", true},
 
 	// The .uk rules are:
@@ -199,7 +193,6 @@ var publicSuffixTestCases = []struct {
 	// plc.uk
 	// police.uk
 	// *.sch.uk
-	// blogspot.co.uk (in the PRIVATE DOMAIN section).
 	{"uk", "uk", true},
 	{"aaa.uk", "uk", true},
 	{"www.aaa.uk", "uk", true},
@@ -210,24 +203,12 @@ var publicSuffixTestCases = []struct {
 	{"www.sch.uk", "www.sch.uk", true},
 	{"co.uk", "co.uk", true},
 	{"www.co.uk", "co.uk", true},
-	{"blogspot.co.uk", "blogspot.co.uk", false}, // PRIVATE DOMAIN.
-	{"blogspot.nic.uk", "uk", true},
-	{"blogspot.sch.uk", "blogspot.sch.uk", true},
 
 	// The .рф rules are
 	// рф (xn--p1ai)
 	{"xn--p1ai", "xn--p1ai", true},
 	{"aaa.xn--p1ai", "xn--p1ai", true},
 	{"www.xxx.yyy.xn--p1ai", "xn--p1ai", true},
-
-	// The .bd rules are:
-	// *.bd
-	{"bd", "bd", false}, // The catch-all "*" rule is not in the ICANN DOMAIN section. See footnote (†).
-	{"www.bd", "www.bd", true},
-	{"xxx.www.bd", "www.bd", true},
-	{"zzz.bd", "zzz.bd", true},
-	{"www.zzz.bd", "zzz.bd", true},
-	{"www.xxx.yyy.zzz.bd", "zzz.bd", true},
 
 	// The .ck rules are:
 	// *.ck
@@ -252,12 +233,6 @@ var publicSuffixTestCases = []struct {
 	{"landing.myjino.ru", "myjino.ru", false},
 	{"www.landing.myjino.ru", "www.landing.myjino.ru", false},
 	{"spectrum.vps.myjino.ru", "spectrum.vps.myjino.ru", false},
-
-	// The .uberspace.de rules (in the PRIVATE DOMAIN section) are:
-	// *.uberspace.de
-	{"uberspace.de", "de", true}, // "de" is in the ICANN DOMAIN section. See footnote (†).
-	{"aaa.uberspace.de", "aaa.uberspace.de", false},
-	{"bbb.ccc.uberspace.de", "ccc.uberspace.de", false},
 
 	// There are no .nosuchtld rules.
 	{"nosuchtld", "nosuchtld", false},
@@ -322,10 +297,10 @@ func TestNumICANNRules(t *testing.T) {
 	// Check the last ICANN and first Private rules. If the underlying public
 	// suffix list changes, we may need to update these hard-coded checks.
 	if got, want := rules[numICANNRules-1], "zuerich"; got != want {
-		t.Errorf("last ICANN rule: got %q, wawnt %q", got, want)
+		t.Errorf("last ICANN rule: got %q, want %q", got, want)
 	}
-	if got, want := rules[numICANNRules], "cc.ua"; got != want {
-		t.Errorf("first Private rule: got %q, wawnt %q", got, want)
+	if got, want := rules[numICANNRules], "co.krd"; got != want {
+		t.Errorf("first Private rule: got %q, want %q", got, want)
 	}
 }
 
@@ -348,6 +323,10 @@ type slowPublicSuffixRule struct {
 // This function returns the public suffix, not the registrable domain, and so
 // it stops after step 6.
 func slowPublicSuffix(domain string) (string, bool) {
+	if _, err := netip.ParseAddr(domain); err == nil {
+		return domain, false
+	}
+
 	match := func(rulePart, domainPart string) bool {
 		switch rulePart[0] {
 		case '*':

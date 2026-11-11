@@ -42,7 +42,6 @@ func ExamplePublicSuffix_manager() {
 		"foo.org",
 		"foo.co.uk",
 		"foo.dyndns.org",
-		"foo.blogspot.co.uk",
 		"cromulent",
 	}
 
@@ -77,7 +76,7 @@ func ExamplePublicSuffix_manager() {
 	// >               golang.dev             dev  is  ICANN Managed
 	// >               golang.net             net  is  ICANN Managed
 	// >          play.golang.org             org  is  ICANN Managed
-	// >  gophers.in.space.museum    space.museum  is  ICANN Managed
+	// >  gophers.in.space.museum          museum  is  ICANN Managed
 	// >
 	// >                 0emm.com             com  is  ICANN Managed
 	// >               a.0emm.com      a.0emm.com  is  Privately Managed
@@ -88,6 +87,5 @@ func ExamplePublicSuffix_manager() {
 	// >                  foo.org             org  is  ICANN Managed
 	// >                foo.co.uk           co.uk  is  ICANN Managed
 	// >           foo.dyndns.org      dyndns.org  is  Privately Managed
-	// >       foo.blogspot.co.uk  blogspot.co.uk  is  Privately Managed
 	// >                cromulent       cromulent  is  Unmanaged
 }

@@ -3,14 +3,12 @@
 // license that can be found in the LICENSE file.
 
 //go:build aix || darwin || dragonfly || freebsd || linux || netbsd || openbsd || solaris || windows || zos
-// +build aix darwin dragonfly freebsd linux netbsd openbsd solaris windows zos
 
 package socket_test
 
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"os/exec"
@@ -447,11 +445,7 @@ func main() {
 	if runtime.Compiler == "gccgo" {
 		t.Skip("skipping race test when built with gccgo")
 	}
-	dir, err := ioutil.TempDir("", "testrace")
-	if err != nil {
-		t.Fatalf("failed to create temp directory: %v", err)
-	}
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 	goBinary := filepath.Join(runtime.GOROOT(), "bin", "go")
 	t.Logf("%s version", goBinary)
 	got, err := exec.Command(goBinary, "version").CombinedOutput()
@@ -464,7 +458,7 @@ func main() {
 	for i, test := range tests {
 		t.Run(fmt.Sprintf("test %d", i), func(t *testing.T) {
 			src := filepath.Join(dir, fmt.Sprintf("test%d.go", i))
-			if err := ioutil.WriteFile(src, []byte(test), 0644); err != nil {
+			if err := os.WriteFile(src, []byte(test), 0644); err != nil {
 				t.Fatalf("failed to write file: %v", err)
 			}
 			t.Logf("%s run -race %s", goBinary, src)

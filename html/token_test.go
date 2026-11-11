@@ -6,13 +6,31 @@ package html
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"io"
-	"io/ioutil"
+	"os"
+	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
+
+	"golang.org/x/net/html/atom"
 )
+
+// https://github.com/golang/go/issues/58246
+const issue58246 = `<!--[if gte mso 12]>
+  <xml>
+      <o:OfficeDocumentSettings>
+      <o:AllowPNG/>
+      <o:PixelsPerInch>96</o:PixelsPerInch>
+      </o:OfficeDocumentSettings>
+    </xml>
+<![endif]-->`
 
 type tokenTest struct {
 	// A short description of the test case.
@@ -295,7 +313,7 @@ var tokenTests = []tokenTest{
 		"<?xml?>",
 		"<!--?xml?-->",
 	},
-	// Comments.
+	// Comments. See also func TestComments.
 	{
 		"comment0",
 		"abc<b><!-- skipme --></b>def",
@@ -314,7 +332,7 @@ var tokenTests = []tokenTest{
 	{
 		"comment3",
 		"a<!--x>-->z",
-		"a$<!--x&gt;-->$z",
+		"a$<!--x>-->$z",
 	},
 	{
 		"comment4",
@@ -334,7 +352,7 @@ var tokenTests = []tokenTest{
 	{
 		"comment7",
 		"a<!---<>z",
-		"a$<!---&lt;&gt;z-->",
+		"a$<!---<>z-->",
 	},
 	{
 		"comment8",
@@ -375,6 +393,123 @@ var tokenTests = []tokenTest{
 		"comment15",
 		"a<!-- !-->z",
 		"a$<!-- !-->$z",
+	},
+	{
+		"comment16",
+		"a<!--i\x00j-->z",
+		"a$<!--i\uFFFDj-->$z",
+	},
+	{
+		"comment17",
+		"a<!--\x00",
+		"a$<!--\uFFFD-->",
+	},
+	{
+		"comment18",
+		"a<!--<!-->z",
+		"a$<!--<!-->$z",
+	},
+	{
+		"comment19",
+		"a<!--<!--",
+		"a$<!--<!-->",
+	},
+	{
+		"comment20",
+		"a<!--ij--kl-->z",
+		"a$<!--ij--kl-->$z",
+	},
+	{
+		"comment21",
+		"a<!--ij--kl--!>z",
+		"a$<!--ij--kl-->$z",
+	},
+	{
+		"comment22",
+		"a<!--!--!<--!-->z",
+		"a$<!--!--!<--!-->$z",
+	},
+	{
+		"comment23",
+		"a<!--&gt;-->z",
+		"a$<!--&gt;-->$z",
+	},
+	{
+		"comment24",
+		"a<!--&gt;>x",
+		"a$<!--&gt;>x-->",
+	},
+	{
+		"comment25",
+		"a<!--&gt;&gt;",
+		"a$<!--&gt;>-->",
+	},
+	{
+		"comment26",
+		"a<!--&gt;&gt;-",
+		"a$<!--&gt;>-->",
+	},
+	{
+		"comment27",
+		"a<!--&gt;&gt;-->z",
+		"a$<!--&gt;>-->$z",
+	},
+	{
+		"comment28",
+		"a<!--&amp;&gt;-->z",
+		"a$<!--&amp;>-->$z",
+	},
+	{
+		"comment29",
+		"a<!--&amp;gt;-->z",
+		"a$<!--&amp;gt;-->$z",
+	},
+	{
+		"comment30",
+		"a<!--&nosuchentity;-->z",
+		"a$<!--&amp;nosuchentity;-->$z",
+	},
+	{
+		"comment31",
+		"a<!--i>>j-->z",
+		"a$<!--i>>j-->$z",
+	},
+	{
+		"comment32",
+		"a<!--i!>>j-->z",
+		"a$<!--i!&gt;>j-->$z",
+	},
+	// https://stackoverflow.design/email/base/mso/#targeting-specific-outlook-versions
+	// says "[For] Windows Outlook 2003 and above... conditional comments allow
+	// us to add bits of HTML that are only read by the Word-based versions of
+	// Outlook". These comments (with angle brackets) should pass through
+	// unchanged (by this Go package) when rendering.
+	//
+	// We should also still escape ">" as "&gt;" when necessary.
+	// https://github.com/golang/go/issues/48237
+	//
+	// The "your code" example below comes from that stackoverflow.design link
+	// above but note that it can contain angle-bracket-rich XML.
+	// https://github.com/golang/go/issues/58246
+	{
+		"issue48237CommentWithAmpgtsemi1",
+		"a<!--<p></p>&lt;!--[video]--&gt;-->z",
+		"a$<!--<p></p><!--[video]--&gt;-->$z",
+	},
+	{
+		"issue48237CommentWithAmpgtsemi2",
+		"a<!--<p></p>&lt;!--[video]--!&gt;-->z",
+		"a$<!--<p></p><!--[video]--!&gt;-->$z",
+	},
+	{
+		"issue58246MicrosoftOutlookComment1",
+		"a<!--[if mso]> your code <![endif]-->z",
+		"a$<!--[if mso]> your code <![endif]-->$z",
+	},
+	{
+		"issue58246MicrosoftOutlookComment2",
+		"a" + issue58246 + "z",
+		"a$" + issue58246 + "$z",
 	},
 	// An attribute with a backslash.
 	{
@@ -463,12 +598,74 @@ var tokenTests = []tokenTest{
 		`<p id=can't><p id=won't>`,
 		`<p id="can&#39;t">$<p id="won&#39;t">`,
 	},
+	// WHATWG 13.2.5.32 equals sign before attribute name state
+	{
+		"equals sign before attribute name",
+		`<p  =>`,
+		`<p =="">`,
+	},
+	{
+		"equals sign before attribute name, extra cruft",
+		`<p  =asd>`,
+		`<p =asd="">`,
+	},
+	{
+		"forward slash before attribute name",
+		`<p/=">`,
+		`<p ="="">`,
+	},
+	{
+		"forward slash before attribute name with spaces around",
+		`<p / =">`,
+		`<p ="="">`,
+	},
+	{
+		"forward slash after attribute name followed by a character",
+		`<p a/ ="">`,
+		`<p a="" =""="">`,
+	},
+	{
+		"slash at end of unquoted attribute value",
+		`<p a="\">`,
+		`<p a="\">`,
+	},
+	{
+		"self-closing tag with attribute",
+		`<p a=/>`,
+		`<p a="/">`,
+	},
+	{
+		"duplicate attributes",
+		`<p foo="bar" foo="baz">`,
+		`<p foo="bar">`,
+	},
+	{
+		"duplicate attributes, different case",
+		`<p FOO="bar" foo="baz">`,
+		`<p foo="bar">`,
+	},
+	{
+		"partial doctype",
+		`<!doc`,
+		`<!--doc-->`,
+	},
+	{
+		"partial cdata",
+		`<![CDA`,
+		`<!--[CDA-->`,
+	},
+	{
+		"partial comment",
+		`<!comment`,
+		`<!--comment-->`,
+	},
 }
 
 func TestTokenizer(t *testing.T) {
 	for _, tt := range tokenTests {
 		t.Run(tt.desc, func(t *testing.T) {
 			z := NewTokenizer(strings.NewReader(tt.html))
+			z.AllowCDATA(true)
 			if tt.golden != "" {
 				for i, s := range strings.Split(tt.golden, "$") {
 					if z.Next() == ErrorToken {
@@ -527,7 +724,7 @@ tests:
 				}
 			}
 			// Anything tokenized along with untokenized input or data left in the reader.
-			assembled, err := ioutil.ReadAll(io.MultiReader(&tokenized, bytes.NewReader(z.Buffered()), r))
+			assembled, err := io.ReadAll(io.MultiReader(&tokenized, bytes.NewReader(z.Buffered()), r))
 			if err != nil {
 				t.Errorf("%s: ReadAll: %v", test.desc, err)
 				continue tests
@@ -662,6 +859,14 @@ func TestReaderEdgeCases(t *testing.T) {
 	}
 }
 
+func TestSelfClosingTagValueConfusion(t *testing.T) {
+	z := NewTokenizer(strings.NewReader(`<p a=/>`))
+	tok := z.Next()
+	if tok != StartTagToken {
+		t.Fatalf("unexpected token type: got %s, want %s", tok, StartTagToken)
+	}
+}
+
 // zeroOneByteReader is like a strings.Reader that alternates between
 // returning 0 bytes and 1 byte at a time.
 type zeroOneByteReader struct {
@@ -713,7 +918,7 @@ const (
 )
 
 func benchmarkTokenizer(b *testing.B, level int) {
-	buf, err := ioutil.ReadFile("testdata/go1.html")
+	buf, err := os.ReadFile("testdata/go1.html")
 	if err != nil {
 		b.Fatalf("could not read testdata/go1.html: %v", err)
 	}
@@ -737,7 +942,7 @@ func benchmarkTokenizer(b *testing.B, level int) {
 				// not unescape &lt; to <, or lower-case tag names and attribute keys.
 				z.Raw()
 			case lowLevel:
-				// Caling z.Text, z.TagName and z.TagAttr returns []byte values
+				// Calling z.Text, z.TagName and z.TagAttr returns []byte values
 				// whose contents may change on the next call to z.Next.
 				switch tt {
 				case TextToken, CommentToken, DoctypeToken:
@@ -762,3 +967,235 @@ func benchmarkTokenizer(b *testing.B, level int) {
 func BenchmarkRawLevelTokenizer(b *testing.B)  { benchmarkTokenizer(b, rawLevel) }
 func BenchmarkLowLevelTokenizer(b *testing.B)  { benchmarkTokenizer(b, lowLevel) }
 func BenchmarkHighLevelTokenizer(b *testing.B) { benchmarkTokenizer(b, highLevel) }
+
+type h5libTest struct {
+	Description   string
+	Input         string
+	InitialStates []string
+	Output        []Token
+	Errors        []struct{ Code string }
+}
+
+var unicodeRegexp = regexp.MustCompile(`\\u([0-9a-fA-F]{4})`)
+
+const (
+	tx = 0b10000000
+	t2 = 0b11000000
+	t3 = 0b11100000
+	t4 = 0b11110000
+
+	maskx = 0b00111111
+
+	rune1Max = 1<<7 - 1
+	rune2Max = 1<<11 - 1
+	rune3Max = 1<<16 - 1
+
+	surrogateMin = 0xD800
+	surrogateMax = 0xDFFF
+)
+
+func unescapeUnicode(s string) string {
+	return unicodeRegexp.ReplaceAllStringFunc(s, func(match string) string {
+		// match is something like "\u0000"
+		// Extract the 4 hex digits
+		hex := match[2:]
+
+		// Parse the hex digits into an integer
+		n, err := strconv.ParseInt(hex, 16, 32)
+		if err != nil {
+			panic(err)
+		}
+
+		// The following is a loose copy of unicode/utf8.AppendRune, which ignores
+		// some of the error checking, which is necessary to support some of the
+		// test characters.
+
+		if uint32(n) <= rune1Max {
+			return string(byte(n))
+		}
+
+		// Convert the integer to a string
+		switch i := uint32(n); {
+		case i <= rune2Max:
+			return string([]byte{t2 | byte(n>>6), tx | byte(n)&maskx})
+		case i <= rune3Max:
+			return string([]byte{t3 | byte(n>>12), tx | byte(n>>6)&maskx, tx | byte(n)&maskx})
+		case i > rune3Max: // && i <= MaxRune:
+			return string([]byte{t4 | byte(n>>18), tx | byte(n>>12)&maskx, tx | byte(n>>6)&maskx, tx | byte(n)&maskx})
+		default:
+			panic(fmt.Sprintf("unsupported rune %x", n))
+		}
+	})
+}
+
+func (t *h5libTest) UnmarshalJSON(data []byte) error {
+	var test struct {
+		Description   string
+		Input         string
+		DoubleEscaped bool
+		InitialStates []string
+		Output        [][]any
+		Errors        []struct{ Code string }
+	}
+	if err := json.Unmarshal(data, &test); err != nil {
+		return err
+	}
+	*t = h5libTest{
+		Description:   test.Description,
+		Input:         test.Input,
+		InitialStates: test.InitialStates,
+		Errors:        test.Errors,
+	}
+
+	if test.DoubleEscaped {
+		t.Input = unescapeUnicode(t.Input)
+	}
+
+	for _, testToken := range test.Output {
+		token := Token{}
+		switch testToken[0].(string) {
+		case "DOCTYPE":
+			token.Type = DoctypeToken
+			if testToken[1] != nil {
+				token.Data = testToken[1].(string)
+			}
+			// TODO: public/system id, we don't really support this?
+		case "StartTag":
+			if len(testToken) == 4 && testToken[3].(bool) == true {
+				token.Type = SelfClosingTagToken
+			} else {
+				token.Type = StartTagToken
+			}
+			token.Data = testToken[1].(string)
+		case "EndTag":
+			token.Type = EndTagToken
+			token.Data = testToken[1].(string)
+		case "Comment":
+			token.Type = CommentToken
+			token.Data = testToken[1].(string)
+		case "Character":
+			token.Type = TextToken
+			token.Data = testToken[1].(string)
+		default:
+			return fmt.Errorf("unknown token type %s", testToken[0])
+		}
+
+		if test.DoubleEscaped {
+			token.Data = unescapeUnicode(token.Data)
+		}
+
+		if testToken[0] == "DOCTYPE" || testToken[0] == "StartTag" || testToken[0] == "EndTag" {
+			token.DataAtom = atom.Lookup([]byte(token.Data))
+		}
+
+		if (testToken[0] == "StartTag" || testToken[0] == "EndTag") && len(testToken) > 2 {
+			for k, v := range testToken[2].(map[string]any) {
+				token.Attr = append(token.Attr, Attribute{
+					Key: k,
+					Val: v.(string),
+				})
+			}
+		}
+
+		t.Output = append(t.Output, token)
+	}
+
+	return nil
+}
+
+func TestHTML5LibTests(t *testing.T) {
+	skipTests := map[string]bool{
+		// We emit a comment token here, instead of no token. This is a specification
+		// divergence that we may want to fix.
+		"test1.test/Empty end tag":                           true,
+		"test2.test/Empty end tag with following characters": true,
+		"test2.test/Empty end tag with following tag":        true,
+		"test2.test/Empty end tag with following comment":    true,
+		"test2.test/Empty end tag with following end tag":    true,
+		"test3.test/</>":                                 true,
+		"test4.test/CR EOF after doctype name":           true,
+		"test4.test/Doctype public case-sensitivity (1)": true,
+		"test4.test/Doctype public case-sensitivity (2)": true,
+		"test4.test/Doctype system case-sensitivity (1)": true,
+		"test4.test/Doctype system case-sensitivity (2)": true,
+	}
+
+	var tests struct {
+		Tests []h5libTest
+	}
+	testFiles, err := filepath.Glob("testdata/html5lib-tests/tokenizer/*.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, testFile := range testFiles {
+		data, err := os.ReadFile(testFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(data, &tests); err != nil {
+			t.Fatal(err)
+		}
+
+		base := filepath.Base(testFile)
+
+		for _, tc := range tests.Tests {
+			name := fmt.Sprintf("%s/%s", base, tc.Description)
+			t.Run(name, func(t *testing.T) {
+				if skipTests[name] {
+					t.Skip("skipping, known failure")
+				}
+				if len(tc.InitialStates) > 0 {
+					t.Skip("Initial states not supported yet")
+				}
+				if strings.Contains(tc.Input, "<!DOCTYPE") {
+					t.Skip("Skipping DOCTYPE")
+				}
+				z := NewTokenizer(strings.NewReader(tc.Input))
+				var tokens []Token
+				for {
+					if z.Next() == ErrorToken {
+						if z.Err() == io.EOF {
+							break
+						}
+						t.Fatalf("Error: %v", z.Err())
+					}
+					tokens = append(tokens, z.Token())
+				}
+				sortTokenAttributes(tokens)
+				sortTokenAttributes(tc.Output)
+				if !reflect.DeepEqual(tokens, tc.Output) {
+					t.Errorf("\nInput: %s\nGot:\t%#v\nWant:\t%#v\nParse Errors: %s\n", tc.Input, tokens, tc.Output, tc.Errors)
+				}
+			})
+		}
+	}
+}
+
+func sortTokenAttributes(tokens []Token) {
+	for _, token := range tokens {
+		slices.SortFunc(token.Attr, func(a, b Attribute) int {
+			return strings.Compare(a.Namespace+a.Key+a.Val, b.Namespace+b.Key+b.Val)
+		})
+	}
+}
+
+func TestUnicodeAttributeCase(t *testing.T) {
+	// <div a="1" A="1"> is resolved to <div a="1"> because a and A are considered
+	// duplicate attribute names. Different unicode cases are not considered equal
+	// though, so <div ä="1" Ä="1"> is tokenized as <div ä="1" Ä="1">.
+	f := `<div ä="1" Ä="1">`
+	z := NewTokenizer(strings.NewReader(f))
+	if tt := z.Next(); tt != StartTagToken {
+		t.Fatalf("expected StartTagToken, got %s", tt)
+	}
+	tok := z.Token()
+	if len(tok.Attr) != 2 {
+		t.Fatalf("expected 2 attributes, got %d", len(tok.Attr))
+	}
+	if tok.Attr[0].Key != "ä" {
+		t.Errorf("expected attribute key to be 'ä', got %s", tok.Attr[0].Key)
+	}
+	if tok.Attr[1].Key != "Ä" {
+		t.Errorf("expected attribute key to be 'Ä', got %s", tok.Attr[1].Key)
+	}
+}

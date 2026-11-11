@@ -21,7 +21,7 @@ import (
 
 func BenchmarkReadWriteUnicast(b *testing.B) {
 	switch runtime.GOOS {
-	case "fuchsia", "hurd", "js", "nacl", "plan9", "windows":
+	case "fuchsia", "hurd", "js", "nacl", "plan9", "wasip1", "windows":
 		b.Skipf("not supported on %s", runtime.GOOS)
 	}
 
@@ -69,7 +69,7 @@ func BenchmarkReadWriteUnicast(b *testing.B) {
 
 func BenchmarkPacketConnReadWriteUnicast(b *testing.B) {
 	switch runtime.GOOS {
-	case "fuchsia", "hurd", "js", "nacl", "plan9", "windows":
+	case "fuchsia", "hurd", "js", "nacl", "plan9", "wasip1", "windows":
 		b.Skipf("not supported on %s", runtime.GOOS)
 	}
 
@@ -220,7 +220,7 @@ func BenchmarkPacketConnReadWriteUnicast(b *testing.B) {
 
 func TestPacketConnConcurrentReadWriteUnicastUDP(t *testing.T) {
 	switch runtime.GOOS {
-	case "fuchsia", "hurd", "js", "nacl", "plan9", "windows":
+	case "fuchsia", "hurd", "js", "nacl", "plan9", "wasip1", "windows":
 		t.Skipf("not supported on %s", runtime.GOOS)
 	}
 
@@ -324,7 +324,7 @@ func TestPacketConnConcurrentReadWriteUnicastUDP(t *testing.T) {
 
 func TestPacketConnConcurrentReadWriteUnicast(t *testing.T) {
 	switch runtime.GOOS {
-	case "fuchsia", "hurd", "js", "nacl", "plan9", "windows":
+	case "fuchsia", "hurd", "js", "nacl", "plan9", "wasip1", "windows":
 		t.Skipf("not supported on %s", runtime.GOOS)
 	}
 
@@ -351,6 +351,12 @@ func TestPacketConnConcurrentReadWriteUnicast(t *testing.T) {
 		}
 		defer c.Close()
 		p := ipv4.NewPacketConn(c)
+		if n, err := p.ReadBatch(nil, 0); n != 0 || err != nil {
+			t.Fatalf("got %d, %v; want 0, nil", n, err)
+		}
+		if n, err := p.WriteBatch(nil, 0); n != 0 || err != nil {
+			t.Fatalf("got %d, %v; want 0, nil", n, err)
+		}
 		t.Run("ToFrom", func(t *testing.T) {
 			testPacketConnConcurrentReadWriteUnicast(t, p, payload, c.LocalAddr(), false)
 		})

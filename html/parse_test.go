@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -153,9 +152,6 @@ func (a sortedAttributes) Len() int {
 }
 
 func (a sortedAttributes) Less(i, j int) bool {
-	if a[i].Namespace != a[j].Namespace {
-		return a[i].Namespace < a[j].Namespace
-	}
 	return a[i].Key < a[j].Key
 }
 
@@ -243,7 +239,7 @@ func dump(n *Node) (string, error) {
 	return b.String(), nil
 }
 
-var testDataDirs = []string{"testdata/webkit/", "testdata/go/"}
+var testDataDirs = []string{"testdata/html5lib-tests/tree-construction/", "testdata/go/"}
 
 func TestParser(t *testing.T) {
 	for _, testDataDir := range testDataDirs {
@@ -271,11 +267,13 @@ func TestParser(t *testing.T) {
 					continue
 				}
 
-				err = testParseCase(ta.text, ta.want, ta.context, ParseOptionEnableScripting(ta.scripting))
-
-				if err != nil {
-					t.Errorf("%s test #%d %q, %s", tf, i, ta.text, err)
-				}
+				testId := fmt.Sprintf("%s/%d", strings.ReplaceAll(tf, string(os.PathSeparator), "/"), i)
+				t.Run(testId, func(t *testing.T) {
+					err = testParseCase(ta.text, ta.want, ta.context, ParseOptionEnableScripting(ta.scripting))
+					if err != nil {
+						t.Errorf("%s test #%d %q, %s", tf, i, ta.text, err)
+					}
+				})
 			}
 		}
 	}
@@ -388,6 +386,11 @@ var parseTestBlacklist = map[string]bool{
 	// See the a.Template TODO in inHeadIM.
 	`<math><template><mo><template>`:                                     true,
 	`<template><svg><foo><template><foreignObject><div></template><div>`: true,
+	// We don't support "element insertion steps"
+	`<select><button><selectedcontent></button><option>X`:                   true,
+	`<select><button><selectedcontent></button><option>x<i>i<b>ib</i>b`:     true,
+	`<select><button><selectedcontent></button><option>X<option>Y`:          true,
+	`<select><button><selectedcontent></button><option>X<option selected>Y`: true,
 }
 
 // Some test input result in parse trees are not 'well-formed' despite
@@ -446,6 +449,10 @@ var renderTestBlacklist = map[string]bool{
 	`<table><math><select><mi><select></table>`:               true,
 	`<!doctype html><table><colgroup><plaintext></plaintext>`: true,
 	`<!doctype html><svg><plaintext>a</plaintext>b`:           true,
+	// Due to fostering, parsing the rendered output produces a different tree.
+	`<math><mtext><table><mglyph><style><img>`: true,
+	// Confusing plaintext behavior
+	`<!doctype html><table><select><plaintext>a<caption>b`: true,
 }
 
 func TestNodeConsistency(t *testing.T) {
@@ -469,6 +476,7 @@ func TestParseFragmentForeignContentTemplates(t *testing.T) {
 	srcs := []string{
 		"<math><html><template><mn><template></template></template>",
 		"<math><math><head><mi><template>",
+		"<svg><head><title><select><input>",
 	}
 	for _, src := range srcs {
 		// The next line shouldn't infinite-loop.
@@ -476,8 +484,25 @@ func TestParseFragmentForeignContentTemplates(t *testing.T) {
 	}
 }
 
+func TestSearchTagClosesP(t *testing.T) {
+	data := `<p>Unclosed paragraph<search>Search content</search>`
+	node, err := Parse(strings.NewReader(data))
+	if err != nil {
+		t.Fatalf("Error parsing HTML: %v", err)
+	}
+
+	var builder strings.Builder
+	Render(&builder, node)
+	output := builder.String()
+
+	expected := `<html><head></head><body><p>Unclosed paragraph</p><search>Search content</search></body></html>`
+	if output != expected {
+		t.Errorf("Parse(%q) = %q, want %q", data, output, expected)
+	}
+}
+
 func BenchmarkParser(b *testing.B) {
-	buf, err := ioutil.ReadFile("testdata/go1.html")
+	buf, err := os.ReadFile("testdata/go1.html")
 	if err != nil {
 		b.Fatalf("could not read testdata/go1.html: %v", err)
 	}
@@ -487,5 +512,73 @@ func BenchmarkParser(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		Parse(bytes.NewBuffer(buf))
+	}
+}
+
+func TestIssue70179(t *testing.T) {
+	_, err := Parse(strings.NewReader("<table><tbody><svg><td><desc><select></select></tbody>"))
+	if err != nil {
+		t.Fatalf("unexpected failure: %v", err)
+	}
+}
+
+func TestDepthLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		input   string
+		succeed bool
+	}{
+		// Not we don't use 512 as the limit here, because the parser will
+		// insert implied <html> and <body> tags, increasing the size of the
+		// stack by two before we start parsing the <dl>.
+		{"above depth limit", strings.Repeat("<dl>", 511), false},
+		{"below depth limit", strings.Repeat("<dl>", 510), true},
+		{"above depth limit, interspersed elements", strings.Repeat("<dl><img />", 511), false},
+		{"closing tags", strings.Repeat("</dl>", 512), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse(strings.NewReader(tc.input))
+			if tc.succeed && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			} else if !tc.succeed && err == nil {
+				t.Errorf("unexpected success")
+			}
+		})
+	}
+}
+
+func TestTextNodeCoalescing(t *testing.T) {
+	const n = 10000
+	for _, tc := range []struct {
+		name  string
+		input string
+	}{
+		{"body", strings.Repeat("a</x>", n)},
+		{"foster", "<table>" + strings.Repeat("a</x>", n)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var m1, m2 runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&m1)
+			doc, err := Parse(strings.NewReader(tc.input))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			runtime.ReadMemStats(&m2)
+
+			body := doc.FirstChild.LastChild
+			text := body.FirstChild
+			if text == nil || text.Type != TextNode {
+				t.Fatalf("got first child %v, want TextNode", text)
+			}
+			if len(text.Data) != n {
+				t.Errorf("got text length %d, want %d", len(text.Data), n)
+			}
+
+			// Coalescing n 1-byte text tokens should not require O(n^2) memory.
+			if alloc := m2.TotalAlloc - m1.TotalAlloc; alloc > 5<<20 {
+				t.Errorf("Parse allocated %d bytes, want <= %d", alloc, 5<<20)
+			}
+		})
 	}
 }

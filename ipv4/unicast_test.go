@@ -20,7 +20,7 @@ import (
 
 func TestPacketConnReadWriteUnicastUDP(t *testing.T) {
 	switch runtime.GOOS {
-	case "fuchsia", "hurd", "js", "nacl", "plan9", "windows":
+	case "fuchsia", "hurd", "js", "nacl", "plan9", "wasip1", "windows":
 		t.Skipf("not supported on %s", runtime.GOOS)
 	}
 	// Skip this check on z/OS since net.Interfaces() does not return loopback, however
@@ -49,10 +49,8 @@ func TestPacketConnReadWriteUnicastUDP(t *testing.T) {
 			}
 			t.Fatal(err)
 		}
-		p.SetTTL(i + 1)
-		if err := p.SetWriteDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
-			t.Fatal(err)
-		}
+		ttl := i + 1
+		p.SetTTL(ttl)
 
 		backoff := time.Millisecond
 		for {
@@ -72,22 +70,17 @@ func TestPacketConnReadWriteUnicastUDP(t *testing.T) {
 		}
 
 		rb := make([]byte, 128)
-		if err := p.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
-			t.Fatal(err)
-		}
-		if n, _, _, err := p.ReadFrom(rb); err != nil {
+		if n, cm, _, err := p.ReadFrom(rb); err != nil {
 			t.Fatal(err)
 		} else if !bytes.Equal(rb[:n], wb) {
 			t.Fatalf("got %v; want %v", rb[:n], wb)
+		} else if toggle && runtime.GOOS != "zos" && (cm == nil || cm.TTL != ttl) {
+			t.Fatalf("got %v; want ttl=%d", cm, ttl)
 		}
 	}
 }
 
 func TestPacketConnReadWriteUnicastICMP(t *testing.T) {
-	switch runtime.GOOS {
-	case "fuchsia", "hurd", "js", "nacl", "plan9", "windows":
-		t.Skipf("not supported on %s", runtime.GOOS)
-	}
 	if !nettest.SupportsRawSocket() {
 		t.Skipf("not supported on %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
@@ -134,9 +127,6 @@ func TestPacketConnReadWriteUnicastICMP(t *testing.T) {
 			t.Fatal(err)
 		}
 		p.SetTTL(i + 1)
-		if err := p.SetWriteDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
-			t.Fatal(err)
-		}
 
 		backoff := time.Millisecond
 		for {
@@ -157,9 +147,6 @@ func TestPacketConnReadWriteUnicastICMP(t *testing.T) {
 
 		rb := make([]byte, 128)
 	loop:
-		if err := p.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
-			t.Fatal(err)
-		}
 		if n, _, _, err := p.ReadFrom(rb); err != nil {
 			t.Fatal(err)
 		} else {
@@ -179,10 +166,6 @@ func TestPacketConnReadWriteUnicastICMP(t *testing.T) {
 }
 
 func TestRawConnReadWriteUnicastICMP(t *testing.T) {
-	switch runtime.GOOS {
-	case "fuchsia", "hurd", "js", "nacl", "plan9", "windows":
-		t.Skipf("not supported on %s", runtime.GOOS)
-	}
 	if !nettest.SupportsRawSocket() {
 		t.Skipf("not supported on %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
@@ -234,17 +217,11 @@ func TestRawConnReadWriteUnicastICMP(t *testing.T) {
 			}
 			t.Fatal(err)
 		}
-		if err := r.SetWriteDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
-			t.Fatal(err)
-		}
 		if err := r.WriteTo(wh, wb, nil); err != nil {
 			t.Fatal(err)
 		}
 		rb := make([]byte, ipv4.HeaderLen+128)
 	loop:
-		if err := r.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
-			t.Fatal(err)
-		}
 		if _, b, _, err := r.ReadFrom(rb); err != nil {
 			t.Fatal(err)
 		} else {
@@ -260,5 +237,79 @@ func TestRawConnReadWriteUnicastICMP(t *testing.T) {
 				t.Fatalf("got type=%v, code=%v; want type=%v, code=%v", m.Type, m.Code, ipv4.ICMPTypeEchoReply, 0)
 			}
 		}
+	}
+}
+
+func TestReadWriteUnicastIPOptions(t *testing.T) {
+	switch runtime.GOOS {
+	case "fuchsia", "hurd", "js", "nacl", "plan9", "wasip1", "windows":
+		t.Skipf("not supported on %s", runtime.GOOS)
+	}
+	if !nettest.SupportsRawSocket() {
+		t.Skipf("not supported on %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	if _, err := nettest.RoutedInterface("ip4", net.FlagUp|net.FlagLoopback); err != nil {
+		t.Skipf("not available on %s", runtime.GOOS)
+	}
+
+	c, err := net.ListenPacket("ip4:253", "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	r, err := ipv4.NewRawConn(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := ipv4.NewPacketConn(c)
+
+	wb := []byte("HELLO-R-U-THERE")
+	opts := []byte{1, 1, 1, 1}
+	wh := &ipv4.Header{
+		Version:  ipv4.Version,
+		Len:      ipv4.HeaderLen + len(opts),
+		TotalLen: ipv4.HeaderLen + len(opts) + len(wb),
+		TTL:      1,
+		Protocol: 253,
+		Dst:      net.IPv4(127, 0, 0, 1),
+		Options:  opts,
+	}
+
+	// RawConn.ReadFrom with a buffer large enough for header, options, and payload.
+	if err := r.WriteTo(wh, wb, nil); err != nil {
+		t.Fatal(err)
+	}
+	rb := make([]byte, 128)
+	if rh, b, _, err := r.ReadFrom(rb); err != nil {
+		t.Fatal(err)
+	} else if !bytes.Equal(rh.Options, opts) || !bytes.Equal(b, wb) {
+		t.Fatalf("got options=%v, payload=%v; want options=%v, payload=%v", rh.Options, b, opts, wb)
+	}
+
+	// RawConn.ReadFrom with a buffer shorter than header + options.
+	if err := r.WriteTo(wh, wb, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := r.ReadFrom(make([]byte, ipv4.HeaderLen)); err == nil {
+		t.Fatal("got nil; want error")
+	}
+
+	// PacketConn.ReadFrom with a buffer large enough for options and payload.
+	if err := r.WriteTo(wh, wb, nil); err != nil {
+		t.Fatal(err)
+	}
+	if n, _, _, err := p.ReadFrom(rb); err != nil {
+		t.Fatal(err)
+	} else if !bytes.Equal(rb[:n], wb) {
+		t.Fatalf("got %v; want %v", rb[:n], wb)
+	}
+
+	// PacketConn.ReadFrom with a buffer shorter than options.
+	if err := r.WriteTo(wh, wb, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := p.ReadFrom(make([]byte, len(opts)-1)); err == nil {
+		t.Fatal("got nil; want error")
 	}
 }
